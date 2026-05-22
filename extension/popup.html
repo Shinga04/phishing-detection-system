@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Phishing Scan</title>
+    <style>
+      body { font-family: Segoe UI, sans-serif; width: 320px; margin: 0; padding: 12px; background: #0f172a; color: #e2e8f0; }
+      button { width: 100%; background: #38bdf8; color: #082f49; border: 0; border-radius: 8px; padding: 10px; font-weight: 700; cursor: pointer; }
+      .card { margin-top: 12px; background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 10px; }
+      .danger { color: #f87171; }
+      .warn { color: #fbbf24; }
+      .safe { color: #34d399; }
+    </style>
+  </head>
+  <body>
+    <button id="scanBtn">Scan for Phishing</button>
+    <div id="result" class="card">Click the button to scan this page.</div>
+    <script src="popup.js"></script>
+  </body>
+</html>

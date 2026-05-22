@@ -1,0 +1,9 @@
+﻿*.sqlite
+*.csv
+*.h5
+*.pkl
+*.npy
+.venv/
+venv/
+__pycache__/
+node_modules/
