@@ -98,10 +98,11 @@ App runs at `http://localhost:3000` and calls backend at `http://127.0.0.1:8000`
 5. Open any webpage and click extension button -> **Scan for Phishing**
 
 Behavior:
-- **Floating badge** (bottom-right on each page): gray = idle, pulsing yellow = scanning, green = safer sample, red = possible phishing; **toast** explains the result.
-- **Auto-scan:** after load and when the page changes (debounced), samples links + page text and calls the backend (at most about once every 45s per tab unless you **click the badge** to force a scan).
-- Popup **Scan for Phishing** still works; results also update the badge and highlights.
-- Sends URL/email-like page text to FastAPI backend; highlights risky links in **red** and others in **green**
+- **Floating badge** (bottom-right): gray = idle, yellow = scanning, green = verified safe, red = risky, **orange ? = scanner offline / unverified**.
+- **Malvertising URLs:** scans current page URL, links, iframes, ad slots, scripts, forms, and redirect meta tags (prioritizes ad-like elements).
+- **Auto-scan:** debounced on page changes (~45s cooldown); click badge to force rescan.
+- **Popup:** set **Backend API URL** (default `http://127.0.0.1:8000`); saved in extension storage.
+- If the backend is down, the extension does **not** show false green — it uses **client heuristics** only when URL patterns are suspicious.
 
 ## Desktop Agent Setup (Scan Non-Browser Screens)
 
