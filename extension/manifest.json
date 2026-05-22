@@ -1,10 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Phishing Detector",
-  "version": "1.0.0",
-  "description": "Scans active page URLs and email-like content for phishing signals.",
+  "version": "1.1.0",
+  "description": "Scans page URLs (links, ads, iframes) and email content for phishing and malvertising.",
   "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["<all_urls>", "http://127.0.0.1:8000/*"],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*",
+    "https://*/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
@@ -15,7 +20,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["heuristics.js", "content.js"],
       "run_at": "document_idle"
     }
   ]

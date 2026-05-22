@@ -67,15 +67,83 @@
   }
 
   const unwrapGoogleRedirect = (href) => {
+    if (typeof PhishHeuristics !== "undefined") {
+      return PhishHeuristics.unwrapGoogleRedirect(href) || "";
+    }
     try {
       const u = new URL(href);
       if (u.hostname === "www.google.com" && u.pathname === "/url") {
         return u.searchParams.get("q") || href;
       }
     } catch {
-      // ignore invalid URLs
+      /* ignore */
     }
     return href;
+  };
+
+  const AD_SELECTOR =
+    '[id*="ad" i], [class*="ad-" i], [class*="advert" i], [class*="sponsor" i], ins.adsbygoogle, [data-ad], iframe[src*="doubleclick"], iframe[src*="googlesyndication"]';
+
+  function isAdLikeElement(el) {
+    if (!el || !el.closest) return false;
+    return Boolean(el.closest(AD_SELECTOR));
+  }
+
+  function pushUrl(bucket, seen, raw, priority = false) {
+    const norm = unwrapGoogleRedirect(raw);
+    if (!norm || seen.has(norm)) return;
+    seen.add(norm);
+    if (priority) bucket.priority.push(norm);
+    else bucket.rest.push(norm);
+  }
+
+  function collectMalvertisingUrls(root, useEmailContext, maxUrls) {
+    const seen = new Set();
+    const bucket = { priority: [], rest: [] };
+
+    pushUrl(bucket, seen, location.href, true);
+
+    const addFromEl = (el, priority) => {
+      if (!el) return;
+      const attrs = ["href", "src", "data", "action"];
+      for (const attr of attrs) {
+        const val = el.getAttribute?.(attr);
+        if (val) pushUrl(bucket, seen, val, priority);
+      }
+      const dataUrl = el.getAttribute?.("data-url") || el.getAttribute?.("data-href");
+      if (dataUrl) pushUrl(bucket, seen, dataUrl, priority);
+    };
+
+    root.querySelectorAll("iframe[src], embed[src], object[data]").forEach((el) => {
+      addFromEl(el, isAdLikeElement(el));
+    });
+
+    root.querySelectorAll("script[src]").forEach((el) => {
+      const src = el.getAttribute("src");
+      if (src && /^https?:/i.test(src)) addFromEl(el, isAdLikeElement(el));
+    });
+
+    root.querySelectorAll('form[action], meta[http-equiv="refresh"]').forEach((el) => {
+      if (el.tagName === "META") {
+        const content = el.getAttribute("content") || "";
+        const m = content.match(/url=(.+)/i);
+        if (m) pushUrl(bucket, seen, m[1].trim().replace(/['"]/g, ""), true);
+      } else {
+        addFromEl(el, false);
+      }
+    });
+
+    root.querySelectorAll("a[href]").forEach((a) => {
+      addFromEl(a, isAdLikeElement(a));
+    });
+
+    if (!useEmailContext) {
+      document.querySelectorAll(`${AD_SELECTOR} a[href], ${AD_SELECTOR} iframe[src]`).forEach((el) => {
+        addFromEl(el, true);
+      });
+    }
+
+    return [...bucket.priority, ...bucket.rest].slice(0, maxUrls);
   };
 
   const extractUrlsFromText = (text, limit = 50) => {
@@ -91,14 +159,11 @@
     const { maxUrls = 25, maxTextChars = 7000 } = opts;
     const { root, useEmailContext } = getScanContext();
 
-    const anchorUrls = [...root.querySelectorAll("a[href]")]
-      .map((a) => unwrapGoogleRedirect(a.href))
-      .filter(Boolean);
-
     const bodyText = useEmailContext ? (root?.innerText || "").slice(0, maxTextChars) : "";
     const textUrls = extractUrlsFromText(bodyText, maxUrls);
+    const domUrls = collectMalvertisingUrls(root, useEmailContext, maxUrls);
 
-    const urls = [...new Set([...anchorUrls, ...textUrls])].slice(0, maxUrls);
+    const urls = [...new Set([...domUrls, ...textUrls])].slice(0, maxUrls);
     return { urls, emailText: bodyText, root, useEmailContext };
   };
 
@@ -171,6 +236,7 @@
       #${FAB_ID}.scanning { background: #ca8a04; animation: phish-guard-pulse 1.1s ease-in-out infinite; }
       #${FAB_ID}.safe { background: #16a34a; }
       #${FAB_ID}.unsafe { background: #dc2626; animation: phish-guard-shake 0.5s ease; }
+      #${FAB_ID}.unknown { background: #d97706; }
       @keyframes phish-guard-pulse {
         0%, 100% { opacity: 1; transform: scale(1); }
         50% { opacity: 0.85; transform: scale(0.95); }
@@ -200,6 +266,7 @@
       #${TOAST_ID}.show { opacity: 1; transform: translateY(0); }
       #${TOAST_ID}.warn { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
       #${TOAST_ID}.ok { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+      #${TOAST_ID}.unknown { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -236,7 +303,8 @@
   function showToast(text, variant, ms = 5000) {
     const t = ensureToast();
     clearTimeout(toastHideTimer);
-    t.className = variant === "warn" ? "warn" : "ok";
+    const cls = variant === "warn" ? "warn" : variant === "unknown" ? "unknown" : "ok";
+    t.className = cls;
     t.textContent = text;
     requestAnimationFrame(() => {
       t.classList.add("show");
@@ -248,28 +316,40 @@
 
   function setFabState(state) {
     const el = ensureFab();
-    el.classList.remove("idle", "scanning", "safe", "unsafe");
+    el.classList.remove("idle", "scanning", "safe", "unsafe", "unknown");
     el.classList.add(state);
     const labels = {
       idle: "Phishing guard: idle",
       scanning: "Phishing guard: checking…",
       safe: "Phishing guard: looks safer",
       unsafe: "Phishing guard: possible unsafe links",
+      unknown: "Phishing guard: scanner offline or unverified",
     };
     el.setAttribute("aria-label", labels[state] || "Phishing guard");
     if (state === "safe") el.textContent = "✓";
     else if (state === "unsafe") el.textContent = "!";
+    else if (state === "unknown") el.textContent = "?";
     else if (state === "scanning") el.textContent = "…";
     else el.textContent = "•";
   }
 
   function applyAutoResult(payload) {
     if (payload?.error) {
-      setFabState("idle");
-      showToast("Could not reach scanner. Is the backend running?", "warn", 4000);
+      setFabState("unknown");
+      showToast("Could not reach scanner. Is the backend running?", "unknown", 5000);
       return;
     }
-    const { riskyUrlCount, riskyUrls, emailResult } = payload;
+
+    const {
+      riskyUrlCount,
+      riskyUrls,
+      emailResult,
+      backendUnavailable,
+      heuristicOnly,
+      urlsScored,
+      scannedUrlCount,
+    } = payload;
+
     const safeRiskyUrlCount = Number.isFinite(riskyUrlCount) ? riskyUrlCount : 0;
     const safeRiskyUrls = riskyUrls || [];
     applyHighlights(safeRiskyUrls, payload._scanRoot || null);
@@ -281,22 +361,52 @@
     const urlBad = safeRiskyUrlCount >= MIN_RISKY_URLS_FOR_UNSAFE;
     const unsafe = emailBad || urlBad;
 
+    if (backendUnavailable && !unsafe) {
+      setFabState("unknown");
+      showToast(
+        "Scanner offline — URLs were not verified by the AI model. Start the backend or set API URL in the extension popup.",
+        "unknown",
+        6000
+      );
+      return;
+    }
+
     if (unsafe) {
       setFabState("unsafe");
+      const heuristicNote = heuristicOnly ? " (heuristic fallback — start backend for full scan)" : "";
       if (urlBad && emailBad) {
-        showToast("Warning: risky links and suspicious message text. Be careful before clicking.", "warn", 6500);
+        showToast(
+          `Warning: risky links and suspicious message text.${heuristicNote} Be careful before clicking.`,
+          "warn",
+          6500
+        );
       } else if (urlBad) {
-        showToast("Warning: one or more sampled links look like phishing. Be careful before clicking.", "warn", 6500);
+        showToast(
+          `Warning: one or more links look malicious (ads, redirects, or phishing).${heuristicNote}`,
+          "warn",
+          6500
+        );
       } else {
         showToast("Warning: message text matches common phishing patterns. Verify the sender before acting.", "warn", 6500);
       }
+      return;
+    }
+
+    if ((urlsScored ?? 0) === 0 && (scannedUrlCount ?? 0) > 0) {
+      setFabState("unknown");
+      showToast("No URLs could be scored. Check backend connection in extension settings.", "unknown", 5000);
+      return;
+    }
+
+    setFabState("safe");
+    if (lastScanMailContext) {
+      showToast("No strong phishing signals in this message sample. Still stay careful online.", "ok", 4200);
     } else {
-      setFabState("safe");
-      if (lastScanMailContext) {
-        showToast("No strong phishing signals in this message sample. Still stay careful online.", "ok", 4200);
-      } else {
-        showToast("No risky links in the sampled page links. General browsing is not a full safety check.", "ok", 4200);
-      }
+      showToast(
+        "No risky links in sampled page URLs (including ads/iframes). Not a guarantee of safety.",
+        "ok",
+        4200
+      );
     }
   }
 
