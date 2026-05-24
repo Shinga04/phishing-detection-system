@@ -104,9 +104,11 @@ Behavior (v2 — email & links only):
 - **Popup:** set `http://127.0.0.1:8000`, **Test backend connection**, then scan.
 - Display-ad / malvertising detection is **out of scope** for the extension.
 
-## Desktop Agent Setup (Scan Non-Browser Screens)
+## Desktop Agent Setup (Browser OCR + optional full screen)
 
-Use this for desktop apps like WhatsApp Desktop, Outlook Desktop, etc.
+**Default:** captures **Chrome, Edge, and Firefox windows only** (Windows) so phishing pages and visible links are scanned without reading your whole desktop.
+
+Use `--capture-mode all` for WhatsApp Desktop, Outlook Desktop, or other non-browser apps.
 
 1. Install Tesseract OCR (Windows):
 - Download installer: [Tesseract OCR (UB Mannheim)](https://github.com/UB-Mannheim/tesseract/wiki)
@@ -133,25 +135,35 @@ python screen_agent.py
 python screen_agent.py --interval 10
 ```
 
-- **All monitors (default `--monitor 0`):** captures **each physical display** separately, runs OCR on all of them, and merges text (not only the primary screen).
-- **Multi-pass OCR:** Tesseract runs with multiple page-segmentation modes (block + sparse + auto) per capture so chat-style UIs (e.g. WhatsApp Desktop) are less likely to miss links.
+- **Browser capture (default):** `--capture-mode browser` OCRs up to 3 visible browser windows (Chrome/Edge/Firefox on Windows).
+- **Foreground browser:** `--capture-mode foreground` scans only the active window if it is a browser.
+- **All monitors:** `--capture-mode all` captures each physical display (`--monitor 0` = all, `1` = primary only).
+- **Fallback:** if no browser is open, the agent falls back to all monitors unless you pass `--no-fallback-all`.
+- **Multi-pass OCR:** Tesseract runs with multiple page-segmentation modes per capture.
 - **URL repair:** Fixes common OCR glitches (`https: / /`, spaces in `www.`, `hxxp://`, etc.) before extraction.
-- **Desktop scoring:** URL phishing uses a slightly lower confidence cutoff than the browser (OCR often garbles characters); ambiguous OCR + link-like fragments can raise **MEDIUM** with a caution message.
-- **Short links & bare domains:** `bit.ly`, `t.co`, `wa.me`, `chat.whatsapp.com`, bare `domain.tld/path`, etc.
-- **Debug OCR:** `python screen_agent.py --debug` prints OCR preview and extracted URLs. Use `--monitor 1` to scan **primary display only**.
+- **Desktop scoring:** Uses fast-scan API + `p_phishing >= 0.55` (aligned with the extension).
+- **Debug OCR:** `python screen_agent.py --debug` prints capture metadata, OCR preview, and URLs.
 
-5. Optional — small GUI (start/stop, interval, log):
+5. Optional — GUI with extension-style orb (bottom-**left**, opposite the Chrome FAB):
 
 ```bash
 python gui_agent.py
 ```
 
+Orb only (minimal UI — click orb to scan, right-click for settings):
+
+```bash
+python gui_agent.py --orb-only
+```
+
 Behavior:
-- Captures visible screen content locally
+- Captures browser windows (or full screen when configured) locally
 - Extracts text + URLs via OCR
 - Sends URL/text to FastAPI backend
-- **Always-on-top status orb** (bottom-right of the screen): gray idle, pulsing amber while scanning, green = low risk, orange = medium, red = high / phishing email signal, purple = error
-- Logs risk level and risky URLs in the window
+- **Always-on-top orb** (bottom-**left**): same colors as the extension — gray idle, amber scanning, green safe, orange caution, red high risk, orange `?` offline
+- **Toast** above the orb with a short plain-English summary (like the extension)
+- **Click orb** = scan once; **right-click orb** = open settings window
+- Logs risk level and risky URLs in the settings window
 
 ## Notes
 

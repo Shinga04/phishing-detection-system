@@ -6,6 +6,10 @@
   --accent: #38bdf8;
   --danger: #f87171;
   --safe: #34d399;
+  --font-base: 1.125rem;
+  --font-lg: 1.35rem;
+  --font-xl: 1.85rem;
+  --font-2xl: 2.1rem;
 }
 
 * {
@@ -20,6 +24,8 @@ body {
   margin: 0;
   min-height: 100vh;
   font-family: Inter, Segoe UI, sans-serif;
+  font-size: var(--font-base);
+  line-height: 1.55;
   color: var(--text);
   /* Image path set in index.js from public/b1.jpg (avoids css-loader resolving /b1.jpg) */
   background-color: #0b1120;
@@ -36,7 +42,7 @@ body {
 }
 
 .container {
-  max-width: 1000px;
+  max-width: 720px;
   margin: 0 auto;
   padding: 2rem 1rem 3rem;
 }
@@ -45,7 +51,7 @@ body {
   background: rgba(30, 41, 59, 0.88);
   border: 1px solid #334155;
   border-radius: 14px;
-  padding: 1rem 1.2rem;
+  padding: 1.25rem 1.5rem;
   margin-bottom: 1rem;
   box-shadow: 0 8px 24px rgba(2, 6, 23, 0.35);
 }
@@ -56,6 +62,17 @@ body {
 
 .header h1 {
   margin: 0;
+  font-size: var(--font-2xl);
+  line-height: 1.2;
+}
+
+.card h2 {
+  font-size: var(--font-xl);
+  margin-top: 0;
+}
+
+.card h3 {
+  font-size: var(--font-lg);
 }
 
 .header p {
@@ -77,7 +94,8 @@ body {
   border: 1px solid #475569;
   background: #0f172a;
   color: var(--text);
-  padding: 0.75rem;
+  font-size: 1.05rem;
+  padding: 0.9rem 1rem;
 }
 
 .textarea {
@@ -90,7 +108,8 @@ body {
   border-radius: 10px;
   background: var(--accent);
   color: #082f49;
-  padding: 0.65rem 1rem;
+  padding: 0.8rem 1.35rem;
+  font-size: 1.1rem;
   font-weight: 700;
   cursor: pointer;
 }
@@ -110,25 +129,41 @@ body {
   min-width: 11rem;
 }
 
+.analyzer-unified {
+  text-align: center;
+  max-width: 640px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .analyzer-unified h2 {
   margin-top: 0;
+  font-size: var(--font-xl);
 }
 
 .analyzer-hint {
-  font-size: 0.88rem;
+  font-size: 1.05rem;
   color: var(--muted);
-  margin: 0 0 0.5rem;
-  line-height: 1.45;
+  margin: 0 auto 0.75rem;
+  max-width: 36rem;
+  line-height: 1.5;
+}
+
+.analyzer-unified .textarea--unified {
+  text-align: left;
+  min-height: 320px;
+  width: 100%;
 }
 
 .textarea--unified {
-  min-height: 160px;
+  min-height: 280px;
 }
 
 .tag {
   display: inline-block;
   border-radius: 999px;
-  padding: 0.35rem 0.8rem;
+  padding: 0.45rem 1rem;
+  font-size: 1.1rem;
   font-weight: 700;
 }
 
@@ -148,6 +183,7 @@ body {
 
 .progress-label {
   margin-bottom: 0.4rem;
+  font-size: 1.05rem;
 }
 
 .progress-bg {
@@ -165,11 +201,15 @@ body {
 
 .spinner {
   color: var(--accent);
+  font-size: 1.1rem;
+  text-align: center;
 }
 
 .error {
   color: var(--danger);
+  font-size: 1.05rem;
   border-color: rgba(248, 113, 113, 0.45);
+  text-align: center;
 }
 
 .explain-list {
@@ -209,21 +249,21 @@ body {
 }
 
 .explain-list--raw .explain-impact {
-  font-size: 0.9rem;
-  line-height: 1.45;
+  font-size: 1rem;
+  line-height: 1.5;
 }
 
 .explain-title {
   font-weight: 700;
-  font-size: 0.95rem;
+  font-size: 1.1rem;
   margin-bottom: 0.35rem;
   color: var(--text);
 }
 
 .explain-body {
   margin: 0;
-  font-size: 0.88rem;
-  line-height: 1.5;
+  font-size: 1.02rem;
+  line-height: 1.55;
   color: var(--muted);
 }
 
@@ -232,7 +272,7 @@ body {
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
   margin-top: 0.5rem;
-  font-size: 0.75rem;
+  font-size: 0.9rem;
   color: #64748b;
   font-family: ui-monospace, monospace;
 }
@@ -267,25 +307,25 @@ body {
 
 .stat-label {
   display: block;
-  font-size: 0.8rem;
+  font-size: 0.95rem;
   color: var(--muted);
   margin-bottom: 0.35rem;
 }
 
 .stat-value {
-  font-size: 1.35rem;
+  font-size: 1.5rem;
   font-weight: 700;
   color: var(--accent);
 }
 
 .stat-value--small {
-  font-size: 0.85rem;
+  font-size: 1rem;
   font-weight: 600;
   color: var(--text);
 }
 
 .learning-hint {
-  font-size: 0.85rem;
+  font-size: 1rem;
   color: var(--muted);
   margin: 0 0 1rem;
 }
@@ -293,7 +333,8 @@ body {
 .btn {
   border: 0;
   border-radius: 10px;
-  padding: 0.6rem 1rem;
+  padding: 0.7rem 1.15rem;
+  font-size: 1.05rem;
   font-weight: 700;
   cursor: pointer;
 }
@@ -327,7 +368,7 @@ body {
 }
 
 .feedback-label {
-  font-size: 0.9rem;
+  font-size: 1.05rem;
   color: var(--muted);
   margin: 0 0 0.6rem;
 }
@@ -340,7 +381,7 @@ body {
 
 .feedback-msg {
   margin: 0.6rem 0 0;
-  font-size: 0.85rem;
+  font-size: 1rem;
   color: var(--safe);
 }
 

@@ -61,7 +61,7 @@ function AnalyzerForm({ onAnalyze, loading }) {
         placeholder={"URL: https://example.com\nOr paste email headers and body..."}
         value={input}
         onChange={(e) => setInput(e.target.value)}
-        rows={6}
+        rows={14}
       />
       <button className="button" type="submit" disabled={loading || !input.trim()}>
         {loading ? "Analyzing..." : "Analyze"}
