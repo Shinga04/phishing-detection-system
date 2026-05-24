@@ -103,7 +103,7 @@ Behavior:
 - Popup **Scan for Phishing** still works; results also update the badge and highlights.
 - Sends URL/email-like page text to FastAPI backend; highlights risky links in **red** and others in **green**
 
-## Desktop Agent Setup (Scan Non-Browser Screens)
+## Desktop Agent Setup (Scan Browser Screens)
 
 Use this for desktop apps like WhatsApp Desktop, Outlook Desktop, etc.
 
