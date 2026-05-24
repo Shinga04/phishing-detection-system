@@ -5,7 +5,7 @@ function polarityClass(polarity) {
   return "explain-impact explain-impact--info";
 }
 
-function ResultCard({ result, onFeedback, feedbackStatus }) {
+function ResultCard({ result }) {
   if (!result) return null;
 
   const confidence = Math.round((result.confidence || 0) * 100);
@@ -52,36 +52,6 @@ function ResultCard({ result, onFeedback, feedbackStatus }) {
             </li>
           ))}
         </ul>
-      )}
-
-      {onFeedback && (
-        <div className="feedback-row">
-          <p className="feedback-label">Help improve the model:</p>
-          <div className="feedback-actions">
-            <button
-              type="button"
-              className="btn danger-outline"
-              disabled={feedbackStatus === "loading"}
-              onClick={() => onFeedback(1)}
-            >
-              Report as Phishing
-            </button>
-            <button
-              type="button"
-              className="btn safe-outline"
-              disabled={feedbackStatus === "loading"}
-              onClick={() => onFeedback(0)}
-            >
-              Mark as Safe
-            </button>
-          </div>
-          {feedbackStatus === "ok" && (
-            <p className="feedback-msg">Thanks — sample saved for next retrain.</p>
-          )}
-          {feedbackStatus === "error" && (
-            <p className="feedback-msg feedback-msg--error">Could not save feedback.</p>
-          )}
-        </div>
       )}
     </div>
   );

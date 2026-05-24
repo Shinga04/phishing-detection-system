@@ -43,6 +43,20 @@ SUSPICIOUS_KEYWORDS = [
     "furnish",
     "kindly",
     "imf",
+    # casino / lure spam
+    "casino",
+    "bonus",
+    "gambling",
+    "jackpot",
+    "free spin",
+    "no deposit",
+    "direct deposit",
+    "direct deposited",
+    "deposited",
+    "prize",
+    "reward",
+    "claim now",
+    "activated",
 ]
 
 # Regex-style signals that should increment the same keyword-count feature.
@@ -53,9 +67,14 @@ SUSPICIOUS_EMAIL_PATTERNS = [
     re.compile(r"\bmoney\s*gram\b", re.IGNORECASE),
     re.compile(r"\binheritance\b", re.IGNORECASE),
     re.compile(r"\bbeneficiary\b", re.IGNORECASE),
-    re.compile(r"\b(?:usd|us\\$|\\$)\\s*\\d{1,3}(?:,\\d{3})*(?:\\.\\d+)?\\b", re.IGNORECASE),
-    # Common "fill in your details" / personal info harvesting in scams
-    re.compile(r"\byour\\s+(?:name|address|country|occupation|phone|telephone|age|sex)\\b", re.IGNORECASE),
+    re.compile(r"\b(?:usd|\$)\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?\b", re.IGNORECASE),
+    re.compile(r"\bdirect\s+depos(?:it|ited)\b", re.IGNORECASE),
+    re.compile(r"\b(?:casino|gambling|bonus\s+activated|no[_\s-]*deposit)\b", re.IGNORECASE),
+    re.compile(r"\byou\s+received\s+(?:a\s+)?(?:direct\s+)?depos", re.IGNORECASE),
+    re.compile(r"\b(?:from|reply-to):\s*[^<\n]*<[\w.+%-]+@[\w.-]{10,}\.", re.IGNORECASE),
+    re.compile(
+        r"\byour\s+(?:name|address|country|occupation|phone|telephone|age|sex)\b", re.IGNORECASE
+    ),
 ]
 
 # Cap text used for numeric features so huge pastes/thread tails do not dominate length-based signals.
@@ -340,7 +359,10 @@ def extract_email_features_normalized(content: str) -> dict:
         "email_text_length": len(content),
         "email_num_links": len(links),
         "email_suspicious_keywords": keyword_hits,
-        "email_has_spoofed_tld": _safe_bool(sender_suffix in {"ru", "tk", "xyz", "top", "gq"}),
+        "email_has_spoofed_tld": _safe_bool(
+            sender_suffix in {"ru", "tk", "xyz", "top", "gq", "us", "click", "work", "cam"}
+            or _sender_domain_looks_random(content)
+        ),
     }
 
 
@@ -350,31 +372,57 @@ def extract_email_features(text: str) -> dict:
 
 def _sender_host_from_header_line(stripped: str) -> str:
     m = re.search(r"<[\w.+%-]+@([\w.-]+)>", stripped, re.IGNORECASE)
-    if not m:
-        m = re.search(r"[\w.+%-]+@([\w.-]+\.[\w.-]+)\b", stripped)
+    if m:
+        return m.group(1).lower()
+    m = re.search(r"[\w.+%-]+@([\w.-]+\.[\w.-]+)\b", stripped)
     return m.group(1).lower() if m else ""
 
 
-def _extract_sender_registrable_suffix(text: str) -> str:
-    """Parse From:/Reply-To: lines; return public suffix / registrable TLD hint for spoof heuristics."""
+def _hosts_from_header_fields(text: str) -> list:
+    """Collect sender hosts from From:/Reply-To:/Via: (works on one-line preprocessed text)."""
+    hosts = []
     for line in text.splitlines():
         stripped = line.strip()
         low = stripped.lower()
-        if not (low.startswith("from:") or low.startswith("reply-to:")):
-            continue
-        host = _sender_host_from_header_line(stripped)
-        if host:
-            ext = tldextract.extract(host)
-            return (ext.suffix or ext.domain or "").lower()
-    # HTML-stripped pastes often become one line: "... From: Name <n@x.com> ..."
-    m = re.search(
-        r"(?:^|\s)(?:from|reply-to):\s*(?:[^<]*?<)?[\w.+%-]+@([\w.-]+\.[\w.-]+)\b",
-        text,
-        re.IGNORECASE,
-    )
-    if m:
-        ext = tldextract.extract(m.group(1).lower())
-        return (ext.suffix or ext.domain or "").lower()
+        if low.startswith("from:") or low.startswith("reply-to:") or low.startswith("via:"):
+            host = _sender_host_from_header_line(stripped)
+            if host:
+                hosts.append(host)
+    if hosts:
+        return hosts
+    for prefix in ("from:", "reply-to:", "via:"):
+        m = re.search(
+            rf"(?:^|\s){prefix}\s+(.{{0,160}}?)(?=\s(?:subject:|to:|date:|sent:)|$)",
+            text,
+            re.IGNORECASE,
+        )
+        if not m:
+            m = re.search(rf"(?:^|\s){prefix}\s+(.{{0,160}})", text, re.IGNORECASE)
+        if m:
+            host = _sender_host_from_header_line(m.group(0))
+            if host:
+                hosts.append(host)
+    return hosts
+
+
+def _sender_domain_looks_random(text: str) -> bool:
+    """Long or noisy sender/via hostnames often appear in spam/phishing."""
+    for host in _hosts_from_header_fields(text):
+        labels = host.split(".")
+        if any(len(lab) >= 12 for lab in labels):
+            return True
+        if len(labels) >= 4:
+            return True
+    return False
+
+
+def _extract_sender_registrable_suffix(text: str) -> str:
+    """Parse From:/Reply-To:/Via: lines; return public suffix / registrable TLD hint for spoof heuristics."""
+    for host in _hosts_from_header_fields(text):
+        ext = tldextract.extract(host)
+        suffix = (ext.suffix or ext.domain or "").lower()
+        if suffix:
+            return suffix
     return ""
 
 
@@ -438,15 +486,28 @@ FEATURE_ORDER = [
 ]
 
 
-def combine_feature_vectors(url: str = "", email_text: str = "") -> dict:
+def combine_feature_vectors(url: str = "", email_text: str = "", skip_ssl: bool = False) -> dict:
     url_feats = extract_url_features(url)
     adv_url_feats = extract_advanced_url_features(url)
-    ssl_feats = extract_ssl_features(url) if url else {
-        "ssl_valid": 0,
-        "ssl_self_signed": 1,
-        "ssl_expiry_days": -1,
-        "ssl_issuer_len": 0,
-    }
+    ssl_feats = (
+        {
+            "ssl_valid": 0,
+            "ssl_self_signed": 0,
+            "ssl_expiry_days": 0,
+            "ssl_issuer_len": 0,
+        }
+        if skip_ssl
+        else (
+            extract_ssl_features(url)
+            if url
+            else {
+                "ssl_valid": 0,
+                "ssl_self_signed": 1,
+                "ssl_expiry_days": -1,
+                "ssl_issuer_len": 0,
+            }
+        )
+    )
     email_plain = preprocess_email_text(email_text)
     email_feats = extract_email_features_normalized(email_plain)
     email_login_signal = _safe_bool(

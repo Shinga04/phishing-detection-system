@@ -1,8 +1,15 @@
-importScripts("heuristics.js");
+/**
+ * Extension background (Option B): email + hyperlink phishing via backend API only.
+ * No malvertising / iframe / client heuristics.
+ */
 
 const DEFAULT_API_BASE = "http://127.0.0.1:8000";
 const URL_CONFIDENCE_THRESHOLD = 0.5;
-const MAX_URLS_PER_SCAN = 30;
+const EXTENSION_UNCERTAIN_PHISH = 0.55;
+const MAX_URLS = 10;
+const FETCH_CONCURRENCY = 3;
+const FETCH_TIMEOUT_MS = 15000;
+const HEALTH_TIMEOUT_MS = 5000;
 
 let cachedApiBase = DEFAULT_API_BASE;
 
@@ -23,106 +30,164 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+function fetchWithTimeout(url, options, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
+function unwrapGoogleRedirect(href) {
+  try {
+    const u = new URL(href);
+    if (u.hostname === "www.google.com" && u.pathname === "/url") {
+      const q = u.searchParams.get("q");
+      return q || href;
+    }
+  } catch {
+    /* ignore */
+  }
+  return href;
+}
+
+function normalizeUrlList(urls) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of urls || []) {
+    let u = unwrapGoogleRedirect(String(raw || "").trim());
+    if (!u || seen.has(u)) continue;
+    if (!/^https?:\/\//i.test(u)) {
+      if (/^www\./i.test(u)) u = `https://${u}`;
+      else continue;
+    }
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
+}
+
+async function checkBackendHealth() {
+  const apiBase = await getApiBase();
+  try {
+    const res = await fetchWithTimeout(`${apiBase}/health`, { method: "GET" }, HEALTH_TIMEOUT_MS);
+    return res.ok;
+  } catch (err) {
+    console.warn("[phish-ext] health failed:", apiBase, err);
+    return false;
+  }
+}
+
 async function analyzeUrl(url) {
   const apiBase = await getApiBase();
-  const res = await fetch(`${apiBase}/analyze/url`, {
+  const res = await fetchWithTimeout(`${apiBase}/analyze/url`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Fast-Scan": "1" },
     body: JSON.stringify({ url }),
   });
-  if (!res.ok) throw new Error(`URL analysis failed (${res.status})`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 async function analyzeEmail(emailText) {
   const apiBase = await getApiBase();
-  const res = await fetch(`${apiBase}/analyze/email`, {
+  const res = await fetchWithTimeout(`${apiBase}/analyze/email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email_text: emailText }),
   });
-  if (!res.ok) throw new Error(`Email analysis failed (${res.status})`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 function isBackendResultRisky(result) {
-  return result?.prediction === "phishing" && (result?.confidence ?? 0) >= URL_CONFIDENCE_THRESHOLD;
+  if (result?.prediction === "phishing" && (result?.confidence ?? 0) >= URL_CONFIDENCE_THRESHOLD) {
+    return true;
+  }
+  const p = Number(result?.p_phishing);
+  return !Number.isNaN(p) && p >= EXTENSION_UNCERTAIN_PHISH;
 }
 
-async function analyzePagePayload(urls, emailText, options = {}) {
-  const analyzeEmailFlag = options.analyzeEmail !== false;
-  const sampleUrls = [...new Set((urls || []).map((u) => PhishHeuristics.unwrapGoogleRedirect(u)).filter(Boolean))].slice(
-    0,
-    MAX_URLS_PER_SCAN
-  );
-
+async function scanUrls(urls) {
   const riskyUrls = [];
-  const heuristicRiskyUrls = PhishHeuristics.filterRiskyHeuristic(sampleUrls);
   let urlsScored = 0;
   let urlsFailed = 0;
+  let index = 0;
+  const list = urls.slice(0, MAX_URLS);
 
-  for (const url of sampleUrls) {
-    try {
-      const result = await analyzeUrl(url);
-      urlsScored += 1;
-      if (isBackendResultRisky(result)) riskyUrls.push(url);
-    } catch (err) {
-      urlsFailed += 1;
-      console.error("URL scan error:", url, err);
-    }
-  }
-
-  const backendReachable = sampleUrls.length === 0 ? true : urlsScored > 0;
-  const backendUnavailable = sampleUrls.length > 0 && urlsScored === 0;
-
-  // Offline / API down: apply client heuristics so malvertising URLs are not marked "safe"
-  if (backendUnavailable && heuristicRiskyUrls.length) {
-    for (const u of heuristicRiskyUrls) {
-      if (!riskyUrls.includes(u)) riskyUrls.push(u);
-    }
-  }
-
-  let emailResult = { prediction: "safe", confidence: 0 };
-  let emailScored = false;
-  if (analyzeEmailFlag && String(emailText || "").trim()) {
-    try {
-      emailResult = await analyzeEmail(emailText);
-      emailScored = true;
-    } catch (err) {
-      console.error("Email scan error:", err);
-      if (backendUnavailable) {
-        const low = emailText.toLowerCase();
-        const scam =
-          low.includes("western union") ||
-          low.includes("mtcn") ||
-          low.includes("verify your account") ||
-          low.includes("click here") ||
-          low.includes("urgent");
-        if (scam) {
-          emailResult = { prediction: "phishing", confidence: 0.7, heuristic: true };
-        }
+  async function worker() {
+    while (index < list.length) {
+      const i = index++;
+      const url = list[i];
+      try {
+        const result = await analyzeUrl(url);
+        urlsScored += 1;
+        if (isBackendResultRisky(result) && !riskyUrls.includes(url)) riskyUrls.push(url);
+      } catch (err) {
+        urlsFailed += 1;
+        console.error("[phish-ext] URL error:", url, err);
       }
     }
   }
 
-  const emailPhish = analyzeEmailFlag && emailResult.prediction === "phishing";
+  const n = Math.min(FETCH_CONCURRENCY, list.length);
+  if (n > 0) await Promise.all(Array.from({ length: n }, () => worker()));
+  return { riskyUrls, urlsScored, urlsFailed };
+}
+
+async function analyzePagePayload(urls, emailText, options = {}) {
+  const analyzeEmail = options.analyzeEmail !== false;
+  const sampleUrls = normalizeUrlList(urls);
+
+  const healthy = await checkBackendHealth();
+  if (!healthy) {
+    return {
+      riskyUrls: [],
+      riskLevel: "LOW",
+      emailResult: { prediction: "safe", confidence: 0 },
+      emailAnalysisIncluded: analyzeEmail && String(emailText || "").trim().length > 0,
+      scannedUrlCount: sampleUrls.length,
+      riskyUrlCount: 0,
+      urlsScored: 0,
+      backendOnline: false,
+      backendUnavailable: true,
+    };
+  }
+
+  let riskyUrls = [];
+  let urlsScored = 0;
+  let urlsFailed = 0;
+
+  if (sampleUrls.length > 0) {
+    const r = await scanUrls(sampleUrls);
+    riskyUrls = r.riskyUrls;
+    urlsScored = r.urlsScored;
+    urlsFailed = r.urlsFailed;
+  }
+
+  let emailResult = { prediction: "safe", confidence: 0 };
+  if (analyzeEmail && String(emailText || "").trim()) {
+    try {
+      emailResult = await analyzeEmail(emailText);
+    } catch (err) {
+      console.error("[phish-ext] email error:", err);
+    }
+  }
+
+  const emailPhish = analyzeEmail && isBackendResultRisky(emailResult);
   const riskLevel =
-    riskyUrls.length > 5 || emailPhish ? "HIGH" : riskyUrls.length ? "MEDIUM" : "LOW";
+    riskyUrls.length > 3 || emailPhish ? "HIGH" : riskyUrls.length ? "MEDIUM" : "LOW";
 
   return {
     riskyUrls,
-    heuristicRiskyUrls,
     riskLevel,
     emailResult,
-    emailAnalysisIncluded: analyzeEmailFlag && String(emailText || "").trim().length > 0,
+    emailAnalysisIncluded: analyzeEmail && String(emailText || "").trim().length > 0,
     scannedUrlCount: sampleUrls.length,
     riskyUrlCount: riskyUrls.length,
     urlsScored,
     urlsFailed,
-    backendReachable,
-    backendUnavailable,
-    heuristicOnly: backendUnavailable && heuristicRiskyUrls.length > 0,
-    emailScored,
+    backendOnline: true,
+    backendUnavailable: false,
+    scanIncomplete: sampleUrls.length > 0 && urlsScored === 0 && urlsFailed > 0,
   };
 }
 
@@ -140,6 +205,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       cachedApiBase = base;
       sendResponse({ ok: true, apiBase: base });
     });
+    return true;
+  }
+
+  if (message?.type === "PING_HEALTH") {
+    checkBackendHealth().then((ok) => sendResponse({ ok, apiBase: cachedApiBase }));
     return true;
   }
 
@@ -166,13 +236,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const out = await analyzePagePayload(pageData?.urls || [], pageData?.emailText || "", {
         analyzeEmail: doEmail,
       });
-      await chrome.tabs.sendMessage(tab.id, { type: "HIGHLIGHT_RISK", riskyUrls: out.riskyUrls });
-      await chrome.tabs.sendMessage(tab.id, {
-        type: "AUTO_SCAN_RESULT",
-        ...out,
-        emailAnalysisIncluded: out.emailAnalysisIncluded,
-      });
-
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: "SCAN_RESULT", ...out });
+      } catch {
+        /* tab may not have content script */
+      }
       sendResponse({
         ok: true,
         riskLevel: out.riskLevel,
@@ -180,9 +248,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         riskyUrlCount: out.riskyUrlCount,
         emailPrediction: out.emailResult.prediction,
         emailConfidence: out.emailResult.confidence,
-        emailAnalysisIncluded: out.emailAnalysisIncluded,
         backendUnavailable: out.backendUnavailable,
-        heuristicOnly: out.heuristicOnly,
+        backendOnline: out.backendOnline,
         urlsScored: out.urlsScored,
       });
     } catch (error) {

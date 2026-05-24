@@ -1,17 +1,20 @@
+/**
+ * Content script (Option B): webmail email + link phishing only.
+ * - Gmail/Outlook/Yahoo: floating badge, scan links in open message + email ML.
+ * - Other sites: no badge (use extension popup to scan).
+ */
 (() => {
   const FAB_ID = "phish-guard-fab-ext";
   const TOAST_ID = "phish-guard-toast-ext";
   const HL_MARK = "data-phish-guard-risk";
-  const AUTO_MIN_MS = 45000;
-  const DEBOUNCE_MS = 2200;
-  const INITIAL_DELAY_MS = 2800;
+  const AUTO_MIN_MS = 60000;
+  const DEBOUNCE_MS = 3000;
+  const MAX_URLS = 10;
   const EMAIL_CONFIDENCE_THRESHOLD = 0.6;
-  const MIN_RISKY_URLS_FOR_UNSAFE = 1;
 
   let lastAutoAt = 0;
   let debounceTimer = null;
   let scanInFlight = false;
-  /** @type {boolean} */
   let lastScanMailContext = false;
 
   function isWebmailHost() {
@@ -31,6 +34,12 @@
 
   function findGmailMessagePane() {
     return (
+      document.querySelector("motion.div.a3s") ||
+      document.querySelector("motion.div.a3s.aiL") ||
+      document.querySelector("motion.div.adn.ads") ||
+      document.querySelector("motion.div.adn") ||
+      document.querySelector("motion.div.gs") ||
+      document.querySelector("motion.div[role='listitem'] div.a3s") ||
       document.querySelector("div.a3s") ||
       document.querySelector("div.a3s.aiL") ||
       document.querySelector("div.adn.ads") ||
@@ -40,36 +49,70 @@
     );
   }
 
-  function getGenericScanRoot() {
-    return (
-      document.querySelector("main") ||
-      document.querySelector('[role="main"]') ||
-      document.querySelector("#primary") ||
-      document.querySelector("#contents") ||
-      document.getElementById("content") ||
-      document.querySelector("article") ||
-      document.body
-    );
+  function collectGmailHeaders() {
+    if (!location.hostname.includes("google.com")) return "";
+
+    const lines = [];
+    const subject =
+      document.querySelector("h2.hP")?.innerText?.trim() ||
+      document.querySelector(".ha h2")?.innerText?.trim();
+    if (subject) lines.push(`Subject: ${subject}`);
+
+    const fromEl =
+      document.querySelector(".gD[email]") ||
+      document.querySelector("span.gD[email]") ||
+      document.querySelector("[email][name]");
+    if (fromEl) {
+      const email = fromEl.getAttribute("email")?.trim();
+      const name = fromEl.getAttribute("name")?.trim() || fromEl.innerText?.trim();
+      if (email) {
+        lines.push(name ? `From: ${name} <${email}>` : `From: ${email}`);
+      }
+    }
+
+    document.querySelectorAll(".go, .gQ, .g2").forEach((el) => {
+      const t = el.innerText?.trim();
+      if (t && t.includes("@")) {
+        const label = t.toLowerCase().includes("via") ? "Via" : "Reply-To";
+        if (!lines.some((line) => line.includes(t))) {
+          lines.push(`${label}: ${t.replace(/^via\s+/i, "")}`);
+        }
+      }
+    });
+
+    return lines.join("\n");
   }
 
-  /**
-   * Mail context: treat visible text as email body (Gmail pane or full webmail host fallback).
-   * Generic sites: only scan links in main content; do not send page text as email (avoids false phishing).
-   */
+  function buildEmailText(root, useEmailContext) {
+    if (!useEmailContext) return "";
+    const parts = [];
+    const headers = collectGmailHeaders();
+    if (headers) parts.push(headers);
+    if (root) parts.push((root.innerText || "").slice(0, 7000));
+    return parts.filter(Boolean).join("\n\n").slice(0, 7000);
+  }
+
+  function isEmailResultRisky(emailResult) {
+    if (!emailResult) return false;
+    if (
+      emailResult.prediction === "phishing" &&
+      (emailResult.confidence ?? 0) >= EMAIL_CONFIDENCE_THRESHOLD
+    ) {
+      return true;
+    }
+    const p = Number(emailResult.p_phishing);
+    return !Number.isNaN(p) && p >= 0.55;
+  }
+
   function getScanContext() {
+    if (!isWebmailHost()) return null;
     const pane = findGmailMessagePane();
-    if (isWebmailHost()) {
-      const root = pane || getGenericScanRoot();
-      const useEmail = Boolean(pane);
-      return { root, useEmailContext: useEmail, mailHost: true };
-    }
-    return { root: getGenericScanRoot(), useEmailContext: false, mailHost: false };
+    const headers = collectGmailHeaders();
+    const root = pane || document.querySelector('[role="main"]') || document.body;
+    return { root, useEmailContext: Boolean(pane) || Boolean(headers) };
   }
 
-  const unwrapGoogleRedirect = (href) => {
-    if (typeof PhishHeuristics !== "undefined") {
-      return PhishHeuristics.unwrapGoogleRedirect(href) || "";
-    }
+  function unwrapGoogleRedirect(href) {
     try {
       const u = new URL(href);
       if (u.hostname === "www.google.com" && u.pathname === "/url") {
@@ -79,105 +122,34 @@
       /* ignore */
     }
     return href;
-  };
-
-  const AD_SELECTOR =
-    '[id*="ad" i], [class*="ad-" i], [class*="advert" i], [class*="sponsor" i], ins.adsbygoogle, [data-ad], iframe[src*="doubleclick"], iframe[src*="googlesyndication"]';
-
-  function isAdLikeElement(el) {
-    if (!el || !el.closest) return false;
-    return Boolean(el.closest(AD_SELECTOR));
   }
 
-  function pushUrl(bucket, seen, raw, priority = false) {
-    const norm = unwrapGoogleRedirect(raw);
-    if (!norm || seen.has(norm)) return;
-    seen.add(norm);
-    if (priority) bucket.priority.push(norm);
-    else bucket.rest.push(norm);
+  function extractUrlsFromText(text, limit) {
+    const raw = String(text || "").match(/https?:\/\/[^\s<>"')\]]+|www\.[^\s<>"')\]]+/gi) || [];
+    return [
+      ...new Set(
+        raw
+          .map((u) => (u.toLowerCase().startsWith("www.") ? `https://${u}` : u))
+          .map((u) => u.replace(/[.,;:!?]+$/g, ""))
+      ),
+    ].slice(0, limit);
   }
 
-  function collectMalvertisingUrls(root, useEmailContext, maxUrls) {
-    const seen = new Set();
-    const bucket = { priority: [], rest: [] };
+  function collectLinkData() {
+    const ctx = getScanContext();
+    if (!ctx) return { urls: [], emailText: "", root: null, useEmailContext: false };
 
-    pushUrl(bucket, seen, location.href, true);
+    const { root, useEmailContext } = ctx;
+    const anchorUrls = [...root.querySelectorAll("a[href]")]
+      .map((a) => unwrapGoogleRedirect(a.href))
+      .filter((h) => h && /^https?:\/\//i.test(h));
 
-    const addFromEl = (el, priority) => {
-      if (!el) return;
-      const attrs = ["href", "src", "data", "action"];
-      for (const attr of attrs) {
-        const val = el.getAttribute?.(attr);
-        if (val) pushUrl(bucket, seen, val, priority);
-      }
-      const dataUrl = el.getAttribute?.("data-url") || el.getAttribute?.("data-href");
-      if (dataUrl) pushUrl(bucket, seen, dataUrl, priority);
-    };
+    const bodyText = buildEmailText(root, useEmailContext);
+    const textUrls = extractUrlsFromText(bodyText, MAX_URLS);
+    const urls = [...new Set([...anchorUrls, ...textUrls])].slice(0, MAX_URLS);
 
-    root.querySelectorAll("iframe[src], embed[src], object[data]").forEach((el) => {
-      addFromEl(el, isAdLikeElement(el));
-    });
-
-    root.querySelectorAll("script[src]").forEach((el) => {
-      const src = el.getAttribute("src");
-      if (src && /^https?:/i.test(src)) addFromEl(el, isAdLikeElement(el));
-    });
-
-    root.querySelectorAll('form[action], meta[http-equiv="refresh"]').forEach((el) => {
-      if (el.tagName === "META") {
-        const content = el.getAttribute("content") || "";
-        const m = content.match(/url=(.+)/i);
-        if (m) pushUrl(bucket, seen, m[1].trim().replace(/['"]/g, ""), true);
-      } else {
-        addFromEl(el, false);
-      }
-    });
-
-    root.querySelectorAll("a[href]").forEach((a) => {
-      addFromEl(a, isAdLikeElement(a));
-    });
-
-    if (!useEmailContext) {
-      document.querySelectorAll(`${AD_SELECTOR} a[href], ${AD_SELECTOR} iframe[src]`).forEach((el) => {
-        addFromEl(el, true);
-      });
-    }
-
-    return [...bucket.priority, ...bucket.rest].slice(0, maxUrls);
-  };
-
-  const extractUrlsFromText = (text, limit = 50) => {
-    const t = String(text || "");
-    const raw = t.match(/https?:\/\/[^\s<>"')\]]+|www\.[^\s<>"')\]]+/gi) || [];
-    const normalized = raw
-      .map((u) => (u.toLowerCase().startsWith("www.") ? `https://${u}` : u))
-      .map((u) => u.replace(/[.,;:!?]+$/g, ""));
-    return [...new Set(normalized)].slice(0, limit);
-  };
-
-  const collectEmailBodyData = (opts = {}) => {
-    const { maxUrls = 25, maxTextChars = 7000 } = opts;
-    const { root, useEmailContext } = getScanContext();
-
-    const bodyText = useEmailContext ? (root?.innerText || "").slice(0, maxTextChars) : "";
-    const textUrls = extractUrlsFromText(bodyText, maxUrls);
-    const domUrls = collectMalvertisingUrls(root, useEmailContext, maxUrls);
-
-    const urls = [...new Set([...domUrls, ...textUrls])].slice(0, maxUrls);
     return { urls, emailText: bodyText, root, useEmailContext };
-  };
-
-  const collectPageData = () => {
-    const { urls, emailText, root, useEmailContext } = collectEmailBodyData({
-      maxUrls: 75,
-      maxTextChars: 7000,
-    });
-    return { urls, emailText, useEmailContext };
-  };
-
-  const collectForAutoScan = () => {
-    return collectEmailBodyData({ maxUrls: 25, maxTextChars: 7000 });
-  };
+  }
 
   function clearExtensionHighlights() {
     document.querySelectorAll(`a[${HL_MARK}]`).forEach((a) => {
@@ -187,14 +159,11 @@
     });
   }
 
-  /** Only mark risky links; do not paint unscanned links green. */
-  const applyHighlights = (riskLinks = [], domRoot = null) => {
+  function applyHighlights(riskLinks, domRoot) {
     clearExtensionHighlights();
+    if (!domRoot || !riskLinks?.length) return;
     const riskySet = new Set(riskLinks);
-    if (riskySet.size === 0) return;
-
-    const root = domRoot || getScanContext().root;
-    [...root.querySelectorAll("a[href]")].forEach((link) => {
+    domRoot.querySelectorAll("a[href]").forEach((link) => {
       const href = unwrapGoogleRedirect(link.href);
       if (riskySet.has(link.href) || riskySet.has(href)) {
         link.setAttribute(HL_MARK, "1");
@@ -202,7 +171,7 @@
         link.style.color = "#b91c1c";
       }
     });
-  };
+  }
 
   function injectFabStyles() {
     if (document.getElementById("phish-guard-fab-styles")) return;
@@ -210,63 +179,31 @@
     style.id = "phish-guard-fab-styles";
     style.textContent = `
       #${FAB_ID} {
-        position: fixed;
-        bottom: 22px;
-        right: 22px;
-        width: 46px;
-        height: 46px;
-        border-radius: 50%;
-        z-index: 2147483646;
+        position: fixed; bottom: 22px; right: 22px; width: 46px; height: 46px;
+        border-radius: 50%; z-index: 2147483646;
         box-shadow: 0 4px 14px rgba(0,0,0,0.35);
         border: 2px solid rgba(255,255,255,0.9);
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 11px;
-        font-weight: 800;
-        font-family: system-ui, Segoe UI, sans-serif;
-        color: #fff;
-        text-shadow: 0 1px 2px rgba(0,0,0,0.4);
-        transition: transform 0.2s ease, background 0.35s ease;
-        user-select: none;
+        cursor: pointer; display: flex; align-items: center; justify-content: center;
+        font-size: 11px; font-weight: 800; font-family: system-ui, Segoe UI, sans-serif;
+        color: #fff; user-select: none;
       }
-      #${FAB_ID}:hover { transform: scale(1.06); }
       #${FAB_ID}.idle { background: #64748b; }
-      #${FAB_ID}.scanning { background: #ca8a04; animation: phish-guard-pulse 1.1s ease-in-out infinite; }
+      #${FAB_ID}.scanning { background: #ca8a04; }
       #${FAB_ID}.safe { background: #16a34a; }
-      #${FAB_ID}.unsafe { background: #dc2626; animation: phish-guard-shake 0.5s ease; }
-      #${FAB_ID}.unknown { background: #d97706; }
-      @keyframes phish-guard-pulse {
-        0%, 100% { opacity: 1; transform: scale(1); }
-        50% { opacity: 0.85; transform: scale(0.95); }
-      }
-      @keyframes phish-guard-shake {
-        0%, 100% { transform: translateX(0); }
-        25% { transform: translateX(-3px); }
-        75% { transform: translateX(3px); }
-      }
+      #${FAB_ID}.unsafe { background: #dc2626; }
+      #${FAB_ID}.offline { background: #d97706; }
       #${TOAST_ID} {
-        position: fixed;
-        bottom: 78px;
-        right: 22px;
-        max-width: 280px;
-        padding: 10px 12px;
-        border-radius: 10px;
-        z-index: 2147483647;
-        font-size: 13px;
-        font-family: system-ui, Segoe UI, sans-serif;
-        line-height: 1.35;
-        box-shadow: 0 6px 20px rgba(0,0,0,0.25);
-        opacity: 0;
-        transform: translateY(8px);
-        transition: opacity 0.35s ease, transform 0.35s ease;
-        pointer-events: none;
+        position: fixed; bottom: 78px; right: 22px; max-width: 280px;
+        padding: 10px 12px; border-radius: 10px; z-index: 2147483647;
+        font-size: 13px; font-family: system-ui, Segoe UI, sans-serif;
+        line-height: 1.35; box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+        opacity: 0; pointer-events: none;
+        transition: opacity 0.3s ease;
       }
-      #${TOAST_ID}.show { opacity: 1; transform: translateY(0); }
+      #${TOAST_ID}.show { opacity: 1; }
       #${TOAST_ID}.warn { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
       #${TOAST_ID}.ok { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
-      #${TOAST_ID}.unknown { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+      #${TOAST_ID}.offline { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -279,147 +216,92 @@
     el.id = FAB_ID;
     el.type = "button";
     el.className = "idle";
-    el.textContent = "•";
-    el.title = "Phishing guard — click to scan now";
-    el.setAttribute("aria-label", "Phishing scan status");
-    el.addEventListener("click", () => {
-      lastAutoAt = 0;
-      runAutoScan(true);
-    });
+    el.title = "Scan email links (phishing guard)";
+    el.addEventListener("click", () => runScan(true));
     document.documentElement.appendChild(el);
     return el;
   }
 
   function ensureToast() {
     let t = document.getElementById(TOAST_ID);
-    if (t) return t;
-    t = document.createElement("div");
-    t.id = TOAST_ID;
-    document.documentElement.appendChild(t);
+    if (!t) {
+      t = document.createElement("div");
+      t.id = TOAST_ID;
+      document.documentElement.appendChild(t);
+    }
     return t;
   }
 
-  let toastHideTimer = null;
-  function showToast(text, variant, ms = 5000) {
+  let toastTimer = null;
+  function showToast(text, variant, ms = 4500) {
     const t = ensureToast();
-    clearTimeout(toastHideTimer);
-    const cls = variant === "warn" ? "warn" : variant === "unknown" ? "unknown" : "ok";
-    t.className = cls;
+    clearTimeout(toastTimer);
+    t.className = variant === "warn" ? "warn" : variant === "offline" ? "offline" : "ok";
     t.textContent = text;
-    requestAnimationFrame(() => {
-      t.classList.add("show");
-    });
-    toastHideTimer = setTimeout(() => {
-      t.classList.remove("show");
-    }, ms);
+    requestAnimationFrame(() => t.classList.add("show"));
+    toastTimer = setTimeout(() => t.classList.remove("show"), ms);
   }
 
   function setFabState(state) {
     const el = ensureFab();
-    el.classList.remove("idle", "scanning", "safe", "unsafe", "unknown");
-    el.classList.add(state);
-    const labels = {
-      idle: "Phishing guard: idle",
-      scanning: "Phishing guard: checking…",
-      safe: "Phishing guard: looks safer",
-      unsafe: "Phishing guard: possible unsafe links",
-      unknown: "Phishing guard: scanner offline or unverified",
-    };
-    el.setAttribute("aria-label", labels[state] || "Phishing guard");
-    if (state === "safe") el.textContent = "✓";
-    else if (state === "unsafe") el.textContent = "!";
-    else if (state === "unknown") el.textContent = "?";
-    else if (state === "scanning") el.textContent = "…";
-    else el.textContent = "•";
+    el.className = state;
+    const icon = { idle: "•", scanning: "…", safe: "✓", unsafe: "!", offline: "?" };
+    el.textContent = icon[state] || "•";
   }
 
-  function applyAutoResult(payload) {
+  function applyResult(payload) {
     if (payload?.error) {
-      setFabState("unknown");
-      showToast("Could not reach scanner. Is the backend running?", "unknown", 5000);
+      setFabState("offline");
+      showToast("Cannot reach API. Start backend and set http://127.0.0.1:8000 in extension popup.", "offline");
       return;
     }
 
-    const {
-      riskyUrlCount,
-      riskyUrls,
-      emailResult,
-      backendUnavailable,
-      heuristicOnly,
-      urlsScored,
-      scannedUrlCount,
-    } = payload;
+    const { riskyUrls, riskyUrlCount, emailResult, backendUnavailable, scanIncomplete, _scanRoot } =
+      payload;
+    applyHighlights(riskyUrls || [], _scanRoot);
 
-    const safeRiskyUrlCount = Number.isFinite(riskyUrlCount) ? riskyUrlCount : 0;
-    const safeRiskyUrls = riskyUrls || [];
-    applyHighlights(safeRiskyUrls, payload._scanRoot || null);
-
-    const emailBad =
-      lastScanMailContext &&
-      emailResult?.prediction === "phishing" &&
-      (emailResult?.confidence ?? 0) >= EMAIL_CONFIDENCE_THRESHOLD;
-    const urlBad = safeRiskyUrlCount >= MIN_RISKY_URLS_FOR_UNSAFE;
+    const emailBad = lastScanMailContext && isEmailResultRisky(emailResult);
+    const urlBad = (riskyUrlCount || 0) >= 1;
     const unsafe = emailBad || urlBad;
 
-    if (backendUnavailable && !unsafe) {
-      setFabState("unknown");
-      showToast(
-        "Scanner offline — URLs were not verified by the AI model. Start the backend or set API URL in the extension popup.",
-        "unknown",
-        6000
-      );
+    if (backendUnavailable) {
+      setFabState("offline");
+      showToast("Scanner offline — start uvicorn on port 8000.", "offline");
+      return;
+    }
+
+    if (scanIncomplete && !unsafe) {
+      setFabState("offline");
+      showToast("API is up but link scans failed. Check backend logs and retry.", "offline");
       return;
     }
 
     if (unsafe) {
       setFabState("unsafe");
-      const heuristicNote = heuristicOnly ? " (heuristic fallback — start backend for full scan)" : "";
-      if (urlBad && emailBad) {
-        showToast(
-          `Warning: risky links and suspicious message text.${heuristicNote} Be careful before clicking.`,
-          "warn",
-          6500
-        );
-      } else if (urlBad) {
-        showToast(
-          `Warning: one or more links look malicious (ads, redirects, or phishing).${heuristicNote}`,
-          "warn",
-          6500
-        );
-      } else {
-        showToast("Warning: message text matches common phishing patterns. Verify the sender before acting.", "warn", 6500);
-      }
-      return;
-    }
-
-    if ((urlsScored ?? 0) === 0 && (scannedUrlCount ?? 0) > 0) {
-      setFabState("unknown");
-      showToast("No URLs could be scored. Check backend connection in extension settings.", "unknown", 5000);
+      showToast(
+        urlBad && emailBad
+          ? "Warning: suspicious email and risky links detected."
+          : urlBad
+            ? "Warning: one or more links in this message look like phishing."
+            : "Warning: this message looks like phishing.",
+        "warn"
+      );
       return;
     }
 
     setFabState("safe");
-    if (lastScanMailContext) {
-      showToast("No strong phishing signals in this message sample. Still stay careful online.", "ok", 4200);
-    } else {
-      showToast(
-        "No risky links in sampled page URLs (including ads/iframes). Not a guarantee of safety.",
-        "ok",
-        4200
-      );
-    }
+    showToast("No strong phishing signals in sampled links and text.", "ok");
   }
 
-  function runAutoScan(force = false) {
-    const now = Date.now();
+  function runScan(force) {
+    if (!isWebmailHost()) return;
     if (scanInFlight) return;
-    if (!force && now - lastAutoAt < AUTO_MIN_MS) return;
+    if (!force && Date.now() - lastAutoAt < AUTO_MIN_MS) return;
 
-    const { urls, emailText, root, useEmailContext } = collectForAutoScan();
+    const { urls, emailText, root, useEmailContext } = collectLinkData();
     lastScanMailContext = useEmailContext;
 
     if (urls.length === 0 && !emailText.trim()) {
-      clearExtensionHighlights();
       setFabState("idle");
       return;
     }
@@ -432,56 +314,61 @@
       (res) => {
         scanInFlight = false;
         if (chrome.runtime.lastError) {
-          setFabState("idle");
-          showToast("Extension could not scan. Try reloading the page.", "warn", 4000);
+          setFabState("offline");
+          showToast("Extension error — reload this tab.", "offline");
           return;
         }
         if (res?.ok) {
           lastAutoAt = Date.now();
-          applyAutoResult({ ...res, _scanRoot: root });
-        } else applyAutoResult({ error: res?.error || "unknown" });
+          applyResult({ ...res, _scanRoot: root });
+        } else {
+          applyResult({ error: res?.error });
+        }
       }
     );
   }
 
-  function scheduleAutoScan() {
+  function scheduleScan() {
+    if (scanInFlight) return;
     clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => runAutoScan(false), DEBOUNCE_MS);
+    debounceTimer = setTimeout(() => runScan(false), DEBOUNCE_MS);
   }
 
   chrome.runtime.onMessage.addListener((msg, _, sendResponse) => {
     if (msg?.type === "COLLECT_PAGE_DATA") {
-      sendResponse(collectPageData());
+      const data = collectLinkData();
+      sendResponse({
+        urls: data.urls,
+        emailText: data.emailText,
+        useEmailContext: data.useEmailContext,
+      });
       return true;
     }
-    if (msg?.type === "HIGHLIGHT_RISK") {
-      applyHighlights(msg.riskyUrls || [], getScanContext().root);
-      sendResponse({ ok: true });
-      return true;
-    }
-    if (msg?.type === "AUTO_SCAN_RESULT") {
-      lastScanMailContext = Boolean(msg.emailAnalysisIncluded);
-      applyAutoResult({ ...msg, _scanRoot: getScanContext().root });
+    if (msg?.type === "SCAN_RESULT") {
+      applyResult({ ...msg, _scanRoot: getScanContext()?.root });
       sendResponse({ ok: true });
       return true;
     }
     return false;
   });
 
-  function initAutoWatch() {
+  function init() {
+    if (!isWebmailHost()) return;
     ensureFab();
     setFabState("idle");
-    setTimeout(() => runAutoScan(false), INITIAL_DELAY_MS);
+    setTimeout(() => runScan(false), 3500);
 
-    const obs = new MutationObserver(() => scheduleAutoScan());
-    if (document.body) {
-      obs.observe(document.body, { childList: true, subtree: true });
-    } else {
-      document.addEventListener("DOMContentLoaded", () => {
-        obs.observe(document.body, { childList: true, subtree: true });
-      });
+    const pane = findGmailMessagePane();
+    const target = pane || document.querySelector('[role="main"]');
+    if (target) {
+      const obs = new MutationObserver(scheduleScan);
+      obs.observe(target, { childList: true, subtree: true });
     }
   }
 
-  initAutoWatch();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init, { once: true });
+  } else {
+    init();
+  }
 })();

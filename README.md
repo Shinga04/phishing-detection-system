@@ -97,12 +97,12 @@ App runs at `http://localhost:3000` and calls backend at `http://127.0.0.1:8000`
 4. Select the `extension` folder
 5. Open any webpage and click extension button -> **Scan for Phishing**
 
-Behavior:
-- **Floating badge** (bottom-right): gray = idle, yellow = scanning, green = verified safe, red = risky, **orange ? = scanner offline / unverified**.
-- **Malvertising URLs:** scans current page URL, links, iframes, ad slots, scripts, forms, and redirect meta tags (prioritizes ad-like elements).
-- **Auto-scan:** debounced on page changes (~45s cooldown); click badge to force rescan.
-- **Popup:** set **Backend API URL** (default `http://127.0.0.1:8000`); saved in extension storage.
-- If the backend is down, the extension does **not** show false green — it uses **client heuristics** only when URL patterns are suspicious.
+Behavior (v2 — email & links only):
+- **Webmail** (Gmail, Outlook, Yahoo): floating badge scans **links in the open message** + **email text** via the API.
+- **Other websites:** no badge; use popup **Scan this tab** (links in page + email text on webmail only).
+- **States:** green = safe, red = risky, orange ? = API offline, yellow = scanning.
+- **Popup:** set `http://127.0.0.1:8000`, **Test backend connection**, then scan.
+- Display-ad / malvertising detection is **out of scope** for the extension.
 
 ## Desktop Agent Setup (Scan Non-Browser Screens)
 

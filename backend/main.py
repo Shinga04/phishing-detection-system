@@ -1,9 +1,11 @@
 import logging
+import re
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -185,11 +187,12 @@ def _maybe_auto_store(sample_type: str, input_text: str, base: dict) -> None:
 
 def _finalize_explanation_ui(payload: dict) -> dict:
     """Attach human-friendly explanation rows without changing ML outputs."""
+    payload = _attach_public_scores(payload)
     payload["explanation_friendly"] = get_friendly_explanation(payload.get("explanation"))
     return payload
 
 
-def _predict(feature_dict: dict):
+def _predict(feature_dict: dict, *, explain: bool = True):
     raw_vector = dict_to_vector(feature_dict)
     scaled = scaler.transform(raw_vector)
     probabilities = model.predict_proba(scaled)[0]
@@ -208,9 +211,27 @@ def _predict(feature_dict: dict):
         "prediction": label,
         "confidence": confidence,
         "features": feature_dict,
-        "explanation": explain_prediction(explainer, model, scaled),
+        "explanation": explain_prediction(explainer, model, scaled) if explain else [],
         "_meta": {"p_phishing": phishing_prob, "p_safe": safe_prob},
     }
+
+
+def _attach_public_scores(payload: dict) -> dict:
+    """Expose scores for extension/frontend without changing core prediction fields."""
+    meta = payload.get("_meta") or {}
+    if meta:
+        payload["p_phishing"] = float(meta.get("p_phishing", 0.0))
+        payload["p_safe"] = float(meta.get("p_safe", 0.0))
+    elif "p_phishing" not in payload:
+        if payload.get("prediction") == "phishing":
+            c = float(payload.get("confidence", 0.0))
+            payload["p_phishing"] = c
+            payload["p_safe"] = max(0.0, 1.0 - c)
+        else:
+            c = float(payload.get("confidence", 0.0))
+            payload["p_safe"] = c
+            payload["p_phishing"] = max(0.0, 1.0 - c)
+    return payload
 
 
 def _is_uncertain(p_phishing: float, low: float = 0.35, high: float = 0.85) -> bool:
@@ -229,6 +250,7 @@ def _apply_vt_override(base: dict, url: str = "", email_urls: list = None) -> di
     email_urls = email_urls or []
     p_phish = float((base.get("_meta") or {}).get("p_phishing", 0.0))
     if not _is_uncertain(p_phish) or not vt_enabled():
+        _attach_public_scores(base)
         base.pop("_meta", None)
         return base
 
@@ -271,6 +293,7 @@ def _apply_vt_override(base: dict, url: str = "", email_urls: list = None) -> di
         base["confidence"] = max(float(base.get("confidence", 0.0)), 0.9)
         base["explanation"] = (base.get("explanation") or []) + ["VirusTotal reputation override triggered."]
 
+    _attach_public_scores(base)
     base.pop("_meta", None)
     return base
 
@@ -281,8 +304,9 @@ def health():
 
 
 @app.post("/analyze/url")
-def analyze_url(payload: URLRequest):
+def analyze_url(payload: URLRequest, x_fast_scan: Optional[str] = Header(None)):
     try:
+        fast = (x_fast_scan or "").strip() == "1"
         if is_whitelisted(payload.url):
             return _finalize_explanation_ui(
                 {
@@ -290,36 +314,88 @@ def analyze_url(payload: URLRequest):
                     "confidence": 1.0,
                     "features": {},
                     "explanation": [],
+                    "p_phishing": 0.0,
+                    "p_safe": 1.0,
                 }
             )
-        feature_dict = combine_feature_vectors(url=payload.url, email_text="")
-        base = _predict(feature_dict)
+        feature_dict = combine_feature_vectors(url=payload.url, email_text="", skip_ssl=fast)
+        base = _predict(feature_dict, explain=not fast)
         _maybe_auto_store("url", payload.url, base)
-        return _finalize_explanation_ui(_apply_vt_override(base, url=payload.url))
+        if fast:
+            _attach_public_scores(base)
+            base.pop("_meta", None)
+            out = base
+        else:
+            out = _apply_vt_override(base, url=payload.url)
+        return _finalize_explanation_ui(out)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"URL analysis failed: {exc}") from exc
+
+
+def _email_scam_heuristic(text: str) -> bool:
+    """Fast override for obvious scam/spam patterns before ML."""
+    low = (text or "").lower()
+    if not low.strip():
+        return False
+
+    classic_scam = (
+        "western union" in low
+        or "mtcn" in low
+        or "inheritance" in low
+        or "beneficiary" in low
+        or "daily as per our office" in low
+    )
+    if classic_scam:
+        return True
+
+    lure_terms = (
+        "casino",
+        "gambling",
+        "bonus activated",
+        "no deposit",
+        "no_deposit",
+        "jackpot",
+        "free spin",
+    )
+    deposit_terms = (
+        "direct deposit",
+        "direct deposited",
+        "deposited of $",
+        "you received a direct",
+        "you received direct",
+    )
+    if any(t in low for t in deposit_terms):
+        return True
+    if any(t in low for t in lure_terms) and re.search(
+        r"\$\s*\d{3,}(?:,\d{3})*(?:\.\d+)?", low
+    ):
+        return True
+    if re.search(r"\bdirect\s+depos(?:it|ited)\b", low) and re.search(
+        r"\$\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?", low
+    ):
+        return True
+
+    if re.search(r"(?:from|reply-to|via):\s*[^\n]*@[\w.-]{10,}\.", low):
+        if any(t in low for t in lure_terms + deposit_terms + ("prize", "reward", "claim")):
+            return True
+
+    return False
 
 
 @app.post("/analyze/email")
 def analyze_email(payload: EmailRequest):
     try:
-        # Fast heuristic override for obvious advance-fee / money-transfer scams.
-        # This reduces false negatives without changing the API contract.
-        low = (payload.email_text or "").lower()
-        scam_signals = (
-            ("western union" in low)
-            or ("mtcn" in low)
-            or ("inheritance" in low)
-            or ("beneficiary" in low)
-            or ("daily as per our office" in low)
-        )
-        if scam_signals:
+        if _email_scam_heuristic(payload.email_text):
             return _finalize_explanation_ui(
                 {
                     "prediction": "phishing",
                     "confidence": 0.95,
+                    "p_phishing": 0.95,
+                    "p_safe": 0.05,
                     "features": {"heuristic_override": 1},
-                    "explanation": ["Heuristic override: advance-fee / money-transfer scam pattern detected."],
+                    "explanation": [
+                        "Heuristic override: deposit lure / casino spam / suspicious sender pattern detected."
+                    ],
                 }
             )
         feature_dict = combine_feature_vectors(url="", email_text=payload.email_text)

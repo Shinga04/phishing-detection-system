@@ -55,17 +55,18 @@
       .danger { color: #f87171; }
       .warn { color: #fbbf24; }
       .safe { color: #34d399; }
-      .unknown { color: #fbbf24; }
-      .hint { font-size: 11px; color: #94a3b8; margin-top: 6px; }
+      .offline { color: #fbbf24; }
+      .hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.4; }
     </style>
   </head>
   <body>
     <label for="apiBase">Backend API URL</label>
     <input id="apiBase" type="url" placeholder="http://127.0.0.1:8000" />
     <button id="saveApiBtn" class="secondary" type="button">Save API URL</button>
-    <button id="scanBtn" type="button">Scan for Phishing</button>
-    <div id="result" class="card">Set API URL, start backend, then scan this page.</div>
-    <p class="hint">Reload tabs after changing API URL. Offline scans use heuristics only (orange ?).</p>
+    <button id="testApiBtn" class="secondary" type="button">Test backend connection</button>
+    <button id="scanBtn" type="button">Scan this tab</button>
+    <div id="result" class="card">Webmail: badge auto-scans open email. Other sites: use Scan this tab.</div>
+    <p class="hint">Start: uvicorn main:app --host 127.0.0.1 --port 8000</p>
     <script src="popup.js"></script>
   </body>
 </html>
