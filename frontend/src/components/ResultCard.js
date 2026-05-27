@@ -1,22 +1,24 @@
-function polarityClass(polarity) {
-  if (polarity === "elevated_risk") return "explain-impact explain-impact--risk";
-  if (polarity === "legitimacy_support") return "explain-impact explain-impact--safe";
-  if (polarity === "neutral") return "explain-impact explain-impact--neutral";
-  return "explain-impact explain-impact--info";
-}
+import LimeExplanationPanel from "./LimeExplanationPanel";
+import PhishingRecommendation from "./PhishingRecommendation";
+import { resolveScanType } from "../config/limeExplanationConfig";
 
-function ResultCard({ result }) {
+function ResultCard({ result, scanType }) {
   if (!result) return null;
 
   const confidence = Math.round((result.confidence || 0) * 100);
   const isPhishing = result.prediction === "phishing";
+  const resolvedScanType = resolveScanType(result, scanType);
 
-  const friendly = Array.isArray(result.explanation_friendly) ? result.explanation_friendly : [];
-  const useFriendly = friendly.length > 0;
+  const hasExplanations =
+    (Array.isArray(result.explanation_friendly) && result.explanation_friendly.length > 0) ||
+    (Array.isArray(result.explanation) && result.explanation.length > 0);
 
   return (
-    <div className="card">
+    <div className="card result-card">
       <h2>Analysis Result</h2>
+      <p className="result-scan-type">
+        Scan type: {resolvedScanType === "url" ? "URL" : "Email"}
+      </p>
       <p className={`tag ${isPhishing ? "danger" : "safe"}`}>
         {isPhishing ? "Phishing" : "Safe"}
       </p>
@@ -28,30 +30,12 @@ function ResultCard({ result }) {
         </div>
       </div>
 
-      <h3>Top Feature Explanations</h3>
-      {useFriendly ? (
-        <ul className="explain-list">
-          {friendly.map((item, idx) => (
-            <li key={`${item.raw || idx}-${idx}`} className={polarityClass(item.impact_polarity)}>
-              <div className="explain-title">{item.title || "Signal"}</div>
-              <p className="explain-body">{item.security_impact || item.raw}</p>
-              {item.condition != null && item.weight != null && (
-                <div className="explain-meta">
-                  <span className="explain-condition">{item.condition}</span>
-                  <span className="explain-weight">weight: {item.weight}</span>
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
+      <PhishingRecommendation isPhishing={isPhishing} scanType={resolvedScanType} />
+
+      {hasExplanations ? (
+        <LimeExplanationPanel result={result} scanType={resolvedScanType} />
       ) : (
-        <ul className="explain-list explain-list--raw">
-          {(result.explanation || []).map((item, idx) => (
-            <li key={`${item}-${idx}`} className="explain-impact explain-impact--info">
-              {item}
-            </li>
-          ))}
-        </ul>
+        <p className="lime-explanations__empty">No detailed explanation available for this scan.</p>
       )}
     </div>
   );

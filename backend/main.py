@@ -185,10 +185,40 @@ def _maybe_auto_store(sample_type: str, input_text: str, base: dict) -> None:
     )
 
 
+EMAIL_ONLY_FEATURES = frozenset(
+    {
+        "email_text_length",
+        "email_num_links",
+        "email_suspicious_keywords",
+        "email_has_spoofed_tld",
+    }
+)
+
+
+def _filter_explanations_for_url(friendly: list, features: dict) -> list:
+    """Drop email-only LIME rows when URL scan left those features at zero."""
+    if not friendly:
+        return friendly
+    out = []
+    for item in friendly:
+        key = item.get("feature_key")
+        if key in EMAIL_ONLY_FEATURES:
+            try:
+                if float((features or {}).get(key, 0) or 0) == 0.0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        out.append(item)
+    return out
+
+
 def _finalize_explanation_ui(payload: dict) -> dict:
     """Attach human-friendly explanation rows without changing ML outputs."""
     payload = _attach_public_scores(payload)
-    payload["explanation_friendly"] = get_friendly_explanation(payload.get("explanation"))
+    friendly = get_friendly_explanation(payload.get("explanation"))
+    if payload.get("analysis_type") == "url":
+        friendly = _filter_explanations_for_url(friendly, payload.get("features") or {})
+    payload["explanation_friendly"] = friendly
     return payload
 
 
@@ -316,10 +346,12 @@ def analyze_url(payload: URLRequest, x_fast_scan: Optional[str] = Header(None)):
                     "explanation": [],
                     "p_phishing": 0.0,
                     "p_safe": 1.0,
+                    "analysis_type": "url",
                 }
             )
         feature_dict = combine_feature_vectors(url=payload.url, email_text="", skip_ssl=fast)
         base = _predict(feature_dict, explain=not fast)
+        base["analysis_type"] = "url"
         _maybe_auto_store("url", payload.url, base)
         if fast:
             _attach_public_scores(base)
@@ -396,10 +428,12 @@ def analyze_email(payload: EmailRequest):
                     "explanation": [
                         "Heuristic override: deposit lure / casino spam / suspicious sender pattern detected."
                     ],
+                    "analysis_type": "email",
                 }
             )
         feature_dict = combine_feature_vectors(url="", email_text=payload.email_text)
         base = _predict(feature_dict)
+        base["analysis_type"] = "email"
         _maybe_auto_store("email", payload.email_text, base)
 
         # If email ML is uncertain, optionally enrich using VT on extracted links/domains.
